@@ -274,6 +274,10 @@ select {
   gap: 10px;
 }
 
+.color-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .field,
 .upload {
   position: relative;
@@ -430,6 +434,57 @@ output {
   min-height: 0;
 }
 
+.shell[data-output-mode='image'] .stage__grid {
+  grid-template-columns: 1fr;
+}
+
+.shell[data-output-mode='image'] .stage-card--editor {
+  padding: 18px;
+}
+
+.shell[data-output-mode='image'] #results {
+  min-height: 68vh;
+  background:
+    radial-gradient(circle at 14% 18%, rgba(255, 255, 255, 0.56), transparent 24%),
+    radial-gradient(circle at 86% 14%, color-mix(in srgb, var(--poster-accent) 18%, transparent), transparent 18%),
+    linear-gradient(180deg, color-mix(in srgb, var(--poster-primary) 84%, #ece1d0), color-mix(in srgb, var(--poster-secondary) 78%, #d6c2ae));
+}
+
+.shell[data-output-mode='image'] .results {
+  width: min(90vw, 1240px);
+}
+
+.shell[data-output-mode='image'] .results-transform {
+  padding: 40px;
+}
+
+.shell[data-output-mode='image'] #results::before,
+.shell[data-output-mode='image'] #results::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: 999px;
+  mix-blend-mode: soft-light;
+}
+
+.shell[data-output-mode='image'] #results::before {
+  right: 7%;
+  bottom: 10%;
+  width: 180px;
+  height: 180px;
+  border: 1px solid rgba(255, 252, 247, 0.44);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.22), rgba(207, 91, 62, 0.18));
+}
+
+.shell[data-output-mode='image'] #results::after {
+  left: 8%;
+  top: 16%;
+  width: 120px;
+  height: 120px;
+  background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0));
+}
+
 .stage-card {
   display: flex;
   flex-direction: column;
@@ -507,6 +562,8 @@ output {
 }
 
 .results-transform {
+  position: relative;
+  z-index: 1;
   display: flex;
   max-width: 100%;
   padding: 24px;

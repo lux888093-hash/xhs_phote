@@ -1,5 +1,7 @@
 import {
   type AppState,
+  type DotColorMode,
+  type DotDirectionMode,
   type DotDistributionMode,
   type DotPoint,
   type DotShape,
@@ -11,6 +13,7 @@ import {
   clearCanvas,
   composeExportCanvas,
   computeDots,
+  createDotStyleConfig,
   createBackgroundConfig,
   createDetachedCanvas,
   createExportSurface,
@@ -62,6 +65,11 @@ type AppRefs = {
   layoutDirectionInput: HTMLSelectElement;
   distributionModeInput: HTMLSelectElement;
   shapeInput: HTMLSelectElement;
+  dotColorModeInput: HTMLSelectElement;
+  dotDirectionField: HTMLElement;
+  dotDirectionModeInput: HTMLSelectElement;
+  dotAngleField: HTMLElement;
+  dotAngleInput: HTMLInputElement;
   dotCharField: HTMLElement;
   dotCharInput: HTMLInputElement;
   splitRatioInput: HTMLInputElement;
@@ -74,6 +82,7 @@ type AppRefs = {
   sizeOutput: HTMLOutputElement;
   varianceOutput: HTMLOutputElement;
   countOutput: HTMLOutputElement;
+  dotAngleOutput: HTMLOutputElement;
   backgroundStripeSizeOutput: HTMLOutputElement;
   shuffleButton: HTMLButtonElement;
   undoDotButton: HTMLButtonElement;
@@ -88,6 +97,7 @@ type AppRefs = {
   punchCanvas: HTMLCanvasElement;
   paperPanel: HTMLElement;
   punchPanel: HTMLElement;
+  previewCard: HTMLElement;
   posterPreviewCanvas: HTMLCanvasElement;
   previewTitle: HTMLElement;
   posterThemeLabel: HTMLElement;
@@ -114,6 +124,16 @@ type AppRefs = {
 
 const FIRST_VISIT_KEY = 'paper-dots-lab-visited-v2';
 const POSTER_MIME_TYPE = 'image/jpeg' as const;
+const SHARE_TIMEOUT_MS = 8_000;
+const IMAGE_EXPORT_PROFILE = {
+  maxLongEdge: 3_000,
+  maxPixels: 7_500_000,
+};
+const POSTER_EXPORT_PROFILE = {
+  maxLongEdge: 2_600,
+  maxPixels: 6_000_000,
+  posterWidth: 1_600,
+};
 
 const RATIO_LABELS = Object.fromEntries(POSTER_RATIO_OPTIONS.map(option => [option.value, option.label])) as Record<PosterRatio, string>;
 const FRAME_LABELS = Object.fromEntries(POSTER_FRAME_OPTIONS.map(option => [option.value, option.label])) as Record<PosterFrameStyle, string>;
@@ -141,6 +161,7 @@ class StudioApp {
   private state = createInitialState();
   private posterState = createInitialPosterState();
   private outputMode: OutputMode = 'image';
+  private isExporting = false;
   private imageObjectUrl: string | null = null;
   private backgroundObjectUrl: string | null = null;
   private translateX = 0;
@@ -179,6 +200,18 @@ class StudioApp {
       type: 'set-background-color-secondary',
       value: this.posterState.secondaryColor,
     });
+    this.state = reduceState(this.state, {
+      type: 'set-dot-color-primary',
+      value: this.posterState.primaryColor,
+    });
+    this.state = reduceState(this.state, {
+      type: 'set-dot-color-secondary',
+      value: this.posterState.secondaryColor,
+    });
+    this.state = reduceState(this.state, {
+      type: 'set-dot-color-accent',
+      value: this.posterState.accentColor,
+    });
     this.render();
   }
 
@@ -210,6 +243,8 @@ class StudioApp {
     this.refs.layoutDirectionInput.value = this.state.layoutDirection;
     this.refs.distributionModeInput.value = this.state.dotDistributionMode;
     this.refs.shapeInput.value = this.state.dotShape;
+    this.refs.dotColorModeInput.value = this.state.dotColorMode;
+    this.refs.dotDirectionModeInput.value = this.state.dotDirectionMode;
     this.refs.dotCharField.hidden = this.state.dotShape !== 'char';
     this.refs.dotCharInput.value = this.state.dotChar;
     this.refs.splitRatioInput.value = String(this.state.splitRatio);
@@ -217,14 +252,19 @@ class StudioApp {
     this.refs.sizeInput.value = String(this.state.dotSize);
     this.refs.varianceInput.value = String(this.state.dotVariance);
     this.refs.countInput.value = String(this.state.dotCount);
+    this.refs.dotAngleInput.value = String(this.state.dotDirectionAngle);
     this.refs.sizeOutput.value = String(this.state.dotSize);
     this.refs.varianceOutput.value = String(this.state.dotVariance);
     this.refs.countOutput.value = String(this.state.dotCount);
+    this.refs.dotAngleOutput.value = `${this.state.dotDirectionAngle}°`;
     this.refs.backgroundStripeSizeOutput.value = String(this.state.backgroundStripeSize);
+    const directionSensitive = supportsDotDirection(this.state.dotShape);
     this.refs.countField.hidden = manualMode;
     this.refs.countInput.hidden = manualMode;
     this.refs.countOutput.hidden = manualMode;
-    this.refs.countLabel.textContent = '点数量';
+    this.refs.countLabel.textContent = '数量';
+    this.refs.dotDirectionField.hidden = !directionSensitive;
+    this.refs.dotAngleField.hidden = !directionSensitive || this.state.dotDirectionMode !== 'fixed';
     this.refs.shuffleButton.hidden = manualMode;
     this.refs.undoDotButton.hidden = !manualMode;
 
@@ -234,13 +274,13 @@ class StudioApp {
         : this.state.manualPositiveDots.length + this.state.manualNegativeDots.length;
     this.refs.undoDotButton.disabled = undoCount === 0;
 
-    this.refs.downloadButton.disabled = !this.state.image;
-    this.refs.downloadButton.textContent = posterMode ? '下载海报' : '下载图片';
+    this.refs.downloadButton.disabled = !this.state.image || this.isExporting;
+    this.refs.downloadButton.textContent = this.isExporting ? '导出中…' : posterMode ? '下载海报' : '下载图片';
     this.refs.paletteButton.disabled = !this.state.image;
-    this.refs.paletteButton.hidden = !posterMode;
     this.refs.resultsEl.className = getResultsClass(this.state.layoutDirection, this.state.image);
+    this.refs.previewCard.hidden = !posterMode;
 
-    this.refs.previewTitle.textContent = posterMode ? '海报预览' : '图片预览';
+    this.refs.previewTitle.textContent = '海报预览';
     this.refs.posterThemeLabel.textContent = posterMode ? activeTheme.label : '图片输出';
     this.refs.posterThemeNote.textContent = posterMode ? activeTheme.kicker : 'IMAGE';
     this.refs.posterRatioPill.textContent = `画幅 ${RATIO_LABELS[this.posterState.ratio]}`;
@@ -258,9 +298,9 @@ class StudioApp {
     this.refs.posterPrimaryInput.value = this.posterState.primaryColor;
     this.refs.posterSecondaryInput.value = this.posterState.secondaryColor;
     this.refs.posterAccentInput.value = this.posterState.accentColor;
-    syncSwatch(this.refs.posterPrimaryField, this.posterState.primaryColor);
-    syncSwatch(this.refs.posterSecondaryField, this.posterState.secondaryColor);
-    syncSwatch(this.refs.posterAccentField, this.posterState.accentColor);
+    syncSwatch(this.refs.posterPrimaryField, this.state.dotColorPrimary);
+    syncSwatch(this.refs.posterSecondaryField, this.state.dotColorSecondary);
+    syncSwatch(this.refs.posterAccentField, this.state.dotColorAccent);
 
     this.refs.themeButtons.forEach(button => {
       button.classList.toggle('preset-tile--active', button.dataset.posterTheme === this.posterState.themeId);
@@ -280,6 +320,7 @@ class StudioApp {
     const containerWidth = this.refs.paperCanvas.clientWidth || 400;
     const pixelRatio = window.devicePixelRatio || 1;
     const background = createBackgroundConfig(this.state);
+    const dotStyle = createDotStyleConfig(this.state);
     const surface = this.state.image
       ? getPreviewSurface(containerWidth, pixelRatio, getImageAspect(this.state.image))
       : getEmptySurface(containerWidth, pixelRatio);
@@ -292,20 +333,20 @@ class StudioApp {
       clearCanvas(this.refs.punchCanvas);
       if (this.outputMode === 'poster') {
         renderPosterPreviewCanvas(this.refs.posterPreviewCanvas, null, this.posterState);
-      } else {
-        renderImagePreviewCanvas(this.refs.posterPreviewCanvas, null);
       }
       return;
     }
 
     const { paperDots, punchDots } = computeDots(this.state, surface);
     const rainbowMode = isRainbowShuffle(this.state.shuffleCount);
-    renderPaperCanvas(this.refs.paperCanvas, this.state.image, paperDots, background, this.state.seed, rainbowMode);
-    renderPunchCanvas(this.refs.punchCanvas, this.state.image, punchDots, background, this.state.seed, rainbowMode);
-    this.drawOutputPreview(background);
+    renderPaperCanvas(this.refs.paperCanvas, this.state.image, paperDots, background, this.state.seed, dotStyle, rainbowMode);
+    renderPunchCanvas(this.refs.punchCanvas, this.state.image, punchDots, background, this.state.seed, dotStyle, rainbowMode);
+    if (this.outputMode === 'poster') {
+      this.drawPosterPreview(background);
+    }
   }
 
-  private drawOutputPreview(background: ReturnType<typeof createBackgroundConfig>): void {
+  private drawPosterPreview(background: ReturnType<typeof createBackgroundConfig>): void {
     const artCanvas = composeExportCanvas(
       this.refs.paperCanvas,
       this.refs.punchCanvas,
@@ -313,13 +354,7 @@ class StudioApp {
       this.state.layoutDirection,
       this.state.splitRatio,
     );
-
-    if (this.outputMode === 'poster') {
-      renderPosterPreviewCanvas(this.refs.posterPreviewCanvas, artCanvas, this.posterState);
-      return;
-    }
-
-    renderImagePreviewCanvas(this.refs.posterPreviewCanvas, artCanvas);
+    renderPosterPreviewCanvas(this.refs.posterPreviewCanvas, artCanvas, this.posterState);
   }
 
   private applySplitPreview(): void {
@@ -350,21 +385,30 @@ class StudioApp {
     this.refs.paperPanel.style.clipPath = paperCrop > 0 ? `inset(0 0 0 ${paperCrop}%)` : '';
   }
 
-  private createExportComposition(): { artCanvas: HTMLCanvasElement; background: ReturnType<typeof createBackgroundConfig> } {
+  private createExportComposition(profile: { maxLongEdge: number; maxPixels: number }): {
+    artCanvas: HTMLCanvasElement;
+    background: ReturnType<typeof createBackgroundConfig>;
+  } {
     if (!this.state.image) {
       throw new Error('请先上传图片');
     }
 
     const background = createBackgroundConfig(this.state);
-    const exportSurface = createExportSurface(this.state.image, this.refs.paperCanvas);
+    const exportSurface = createExportSurface(this.state.image, this.refs.paperCanvas, {
+      layoutDirection: this.state.layoutDirection,
+      splitRatio: this.state.splitRatio,
+      maxLongEdge: profile.maxLongEdge,
+      maxPixels: profile.maxPixels,
+    });
     const exportBackground = adjustBackgroundForExport(background, this.refs.paperCanvas, exportSurface);
     const { paperDots, punchDots } = computeDots(this.state, exportSurface);
     const rainbowMode = isRainbowShuffle(this.state.shuffleCount);
+    const dotStyle = createDotStyleConfig(this.state);
     const paperCanvas = createDetachedCanvas(exportSurface);
     const punchCanvas = createDetachedCanvas(exportSurface);
 
-    renderPaperCanvas(paperCanvas, this.state.image, paperDots, exportBackground, this.state.seed, rainbowMode);
-    renderPunchCanvas(punchCanvas, this.state.image, punchDots, exportBackground, this.state.seed, rainbowMode);
+    renderPaperCanvas(paperCanvas, this.state.image, paperDots, exportBackground, this.state.seed, dotStyle, rainbowMode);
+    renderPunchCanvas(punchCanvas, this.state.image, punchDots, exportBackground, this.state.seed, dotStyle, rainbowMode);
 
     return {
       artCanvas: composeExportCanvas(paperCanvas, punchCanvas, exportBackground, this.state.layoutDirection, this.state.splitRatio),
@@ -373,14 +417,21 @@ class StudioApp {
   }
 
   private async downloadPoster(): Promise<void> {
-    if (!this.state.image) {
+    if (!this.state.image || this.isExporting) {
       return;
     }
 
+    this.isExporting = true;
+    this.refs.status.textContent = '正在生成海报…';
+    this.render();
+    await waitForNextPaint();
+
     try {
-      const { artCanvas } = this.createExportComposition();
-      const widthHint = Math.max(1_400, artCanvas.width + 360);
-      const posterCanvas = composePosterCanvas(artCanvas, this.posterState, widthHint);
+      const { artCanvas } = this.createExportComposition(POSTER_EXPORT_PROFILE);
+      this.refs.status.textContent = '正在写入海报文件…';
+      this.render();
+      await waitForNextPaint();
+      const posterCanvas = composePosterCanvas(artCanvas, this.posterState, POSTER_EXPORT_PROFILE.posterWidth);
       const blob = await canvasToExportBlob(posterCanvas, POSTER_MIME_TYPE, 0.92);
       if (!blob) {
         this.refs.status.textContent = '海报导出失败，请稍后重试';
@@ -388,28 +439,49 @@ class StudioApp {
       }
 
       const fileName = getPosterFileName(this.state.fileName);
+      this.refs.status.textContent = '正在调起下载…';
+      this.render();
       if (await tryShareFile(blob, fileName)) {
         return;
       }
 
-      if (isWeixin()) {
+      if (isWeixinMobile()) {
         showSaveOverlay(posterCanvas.toDataURL(POSTER_MIME_TYPE, 0.92));
         return;
       }
 
-      downloadBlob(blob, fileName);
+      const downloadState = await downloadBlob(blob, fileName);
+      if (downloadState === 'failed') {
+        this.refs.status.textContent = '浏览器拦截了下载，请检查下载权限后重试';
+        return;
+      }
+      if (downloadState === 'started') {
+        this.refs.status.textContent = '海报开始下载';
+        clearStatusLater(this.refs.status, '海报开始下载');
+      }
     } catch (error) {
       this.refs.status.textContent = error instanceof Error ? error.message : '海报导出失败';
+    } finally {
+      this.isExporting = false;
+      this.render();
     }
   }
 
   private async downloadImage(): Promise<void> {
-    if (!this.state.image) {
+    if (!this.state.image || this.isExporting) {
       return;
     }
 
+    this.isExporting = true;
+    this.refs.status.textContent = '正在生成图片…';
+    this.render();
+    await waitForNextPaint();
+
     try {
-      const { artCanvas, background } = this.createExportComposition();
+      const { artCanvas, background } = this.createExportComposition(IMAGE_EXPORT_PROFILE);
+      this.refs.status.textContent = '正在写入图片文件…';
+      this.render();
+      await waitForNextPaint();
       const exportOptions = getExportSettings(background);
       const blob = await canvasToExportBlob(artCanvas, exportOptions.mimeType, exportOptions.quality);
       if (!blob) {
@@ -418,18 +490,31 @@ class StudioApp {
       }
 
       const fileName = getExportFileName(this.state.fileName, exportOptions.mimeType);
+      this.refs.status.textContent = '正在调起下载…';
+      this.render();
       if (await tryShareFile(blob, fileName)) {
         return;
       }
 
-      if (isWeixin()) {
+      if (isWeixinMobile()) {
         showSaveOverlay(artCanvas.toDataURL('image/jpeg', 0.88));
         return;
       }
 
-      downloadBlob(blob, fileName);
+      const downloadState = await downloadBlob(blob, fileName);
+      if (downloadState === 'failed') {
+        this.refs.status.textContent = '浏览器拦截了下载，请检查下载权限后重试';
+        return;
+      }
+      if (downloadState === 'started') {
+        this.refs.status.textContent = '图片开始下载';
+        clearStatusLater(this.refs.status, '图片开始下载');
+      }
     } catch (error) {
       this.refs.status.textContent = error instanceof Error ? error.message : '图片导出失败';
+    } finally {
+      this.isExporting = false;
+      this.render();
     }
   }
 
@@ -487,6 +572,9 @@ class StudioApp {
       this.posterState = { ...this.posterState, ...palette };
       this.state = reduceState(this.state, { type: 'set-background-color', value: palette.primaryColor });
       this.state = reduceState(this.state, { type: 'set-background-color-secondary', value: palette.secondaryColor });
+      this.state = reduceState(this.state, { type: 'set-dot-color-primary', value: palette.primaryColor });
+      this.state = reduceState(this.state, { type: 'set-dot-color-secondary', value: palette.secondaryColor });
+      this.state = reduceState(this.state, { type: 'set-dot-color-accent', value: palette.accentColor });
       this.refs.status.textContent = '已根据图片更新配色';
       this.render();
     });
@@ -554,6 +642,18 @@ class StudioApp {
       this.setState({ type: 'set-shape', value: (event.currentTarget as HTMLSelectElement).value as DotShape });
     });
 
+    this.refs.dotColorModeInput.addEventListener('change', event => {
+      this.setState({ type: 'set-dot-color-mode', value: (event.currentTarget as HTMLSelectElement).value as DotColorMode });
+    });
+
+    this.refs.dotDirectionModeInput.addEventListener('change', event => {
+      this.setState({ type: 'set-dot-direction-mode', value: (event.currentTarget as HTMLSelectElement).value as DotDirectionMode });
+    });
+
+    this.refs.dotAngleInput.addEventListener('input', event => {
+      this.setState({ type: 'set-dot-direction-angle', value: Number((event.currentTarget as HTMLInputElement).value) });
+    });
+
     this.refs.dotCharInput.addEventListener('input', event => {
       const value = (event.currentTarget as HTMLInputElement).value;
       if (value.length > 0) {
@@ -614,15 +714,21 @@ class StudioApp {
     });
 
     this.refs.posterPrimaryInput.addEventListener('input', event => {
-      this.updatePoster({ primaryColor: (event.currentTarget as HTMLInputElement).value });
+      const value = (event.currentTarget as HTMLInputElement).value;
+      this.updatePoster({ primaryColor: value });
+      this.setState({ type: 'set-dot-color-primary', value });
     });
 
     this.refs.posterSecondaryInput.addEventListener('input', event => {
-      this.updatePoster({ secondaryColor: (event.currentTarget as HTMLInputElement).value });
+      const value = (event.currentTarget as HTMLInputElement).value;
+      this.updatePoster({ secondaryColor: value });
+      this.setState({ type: 'set-dot-color-secondary', value });
     });
 
     this.refs.posterAccentInput.addEventListener('input', event => {
-      this.updatePoster({ accentColor: (event.currentTarget as HTMLInputElement).value });
+      const value = (event.currentTarget as HTMLInputElement).value;
+      this.updatePoster({ accentColor: value });
+      this.setState({ type: 'set-dot-color-accent', value });
     });
 
     this.refs.paperCanvas.addEventListener('click', event => {
@@ -861,6 +967,36 @@ function createMarkup(): string {
             </div>
           </details>
 
+          <details class="dock-section" open>
+            <summary>调色</summary>
+            <div class="field-grid">
+              <label class="field field--select">
+                <span>点色</span>
+                <select id="dot-color-mode-input">
+                  <option value="photo">照片</option>
+                  <option value="single">单色</option>
+                  <option value="duotone">双色</option>
+                  <option value="gradient">渐变</option>
+                  <option value="candy">糖果</option>
+                </select>
+              </label>
+            </div>
+            <div class="color-grid">
+              <label id="poster-primary-field" class="field field--color">
+                <span>主色</span>
+                <input id="poster-primary-input" type="color" value="#f6efe3" />
+              </label>
+              <label id="poster-secondary-field" class="field field--color">
+                <span>辅色</span>
+                <input id="poster-secondary-input" type="color" value="#d7c8ba" />
+              </label>
+              <label id="poster-accent-field" class="field field--color">
+                <span>强调</span>
+                <input id="poster-accent-input" type="color" value="#cf5b3e" />
+              </label>
+            </div>
+          </details>
+
           <details class="dock-section" data-poster-only open>
             <summary>文字</summary>
             <div class="field-grid">
@@ -879,20 +1015,6 @@ function createMarkup(): string {
               <label class="field">
                 <span>页脚</span>
                 <input id="poster-footer-input" type="text" maxlength="32" placeholder="页脚" />
-              </label>
-            </div>
-            <div class="color-grid">
-              <label id="poster-primary-field" class="field field--color">
-                <span>主底色</span>
-                <input id="poster-primary-input" type="color" value="#f6efe3" />
-              </label>
-              <label id="poster-secondary-field" class="field field--color">
-                <span>辅色</span>
-                <input id="poster-secondary-input" type="color" value="#d7c8ba" />
-              </label>
-              <label id="poster-accent-field" class="field field--color">
-                <span>强调色</span>
-                <input id="poster-accent-input" type="color" value="#cf5b3e" />
               </label>
             </div>
           </details>
@@ -956,7 +1078,11 @@ function createMarkup(): string {
                 <select id="shape-input">
                   <option value="circle">圆形</option>
                   <option value="square">方形</option>
+                  <option value="diamond">菱形</option>
                   <option value="star">五角星形</option>
+                  <option value="spark">星芒形</option>
+                  <option value="heart">爱心形</option>
+                  <option value="flower">花朵形</option>
                   <option value="drop">水滴形</option>
                   <option value="snowflake">雪花形</option>
                   <option value="char">字符形</option>
@@ -965,6 +1091,18 @@ function createMarkup(): string {
               <label id="dot-char-field" class="field" hidden>
                 <span>字符</span>
                 <input id="dot-char-input" type="text" value="喵" />
+              </label>
+              <label id="dot-direction-field" class="field field--select">
+                <span>方向</span>
+                <select id="dot-direction-mode-input">
+                  <option value="fixed">固定</option>
+                  <option value="random">随机</option>
+                </select>
+              </label>
+              <label id="dot-angle-field" class="field">
+                <span>角度</span>
+                <input id="dot-angle-input" type="range" min="0" max="360" value="0" />
+                <output id="dot-angle-output">0°</output>
               </label>
               <label class="field">
                 <span>点大小</span>
@@ -977,7 +1115,7 @@ function createMarkup(): string {
                 <output id="variance-output">0</output>
               </label>
               <label class="field">
-                <span id="count-label">点数量</span>
+                <span id="count-label">数量</span>
                 <input id="count-input" type="range" min="6" max="80" value="18" />
                 <output id="count-output">18</output>
               </label>
@@ -985,8 +1123,12 @@ function createMarkup(): string {
                 <span>波点分布</span>
                 <select id="distribution-mode-input">
                   <option value="random">随机</option>
-                  <option value="manual-unpaired">点一下图片（左右不对应）</option>
-                  <option value="manual-paired">点一下图片（左右对应）</option>
+                  <option value="grid">网格</option>
+                  <option value="burst">放射</option>
+                  <option value="wave">波浪</option>
+                  <option value="spiral">螺旋</option>
+                  <option value="manual-unpaired">手动分开</option>
+                  <option value="manual-paired">手动同步</option>
                 </select>
               </label>
             </div>
@@ -1047,11 +1189,7 @@ function createMarkup(): string {
 
           <aside class="stage-card stage-card--poster">
             <div class="stage-card__head">
-              <span id="preview-title">图片预览</span>
-              <div class="stage-pills">
-                <span id="poster-ratio-pill" class="stage-pill"></span>
-                <span id="poster-frame-pill" class="stage-pill"></span>
-              </div>
+              <span id="preview-title">海报预览</span>
             </div>
             <div class="poster-preview-shell">
               <canvas id="poster-preview-canvas"></canvas>
@@ -1079,6 +1217,11 @@ function getRefs(): AppRefs {
     layoutDirectionInput: query<HTMLSelectElement>('#layout-direction-input'),
     distributionModeInput: query<HTMLSelectElement>('#distribution-mode-input'),
     shapeInput: query<HTMLSelectElement>('#shape-input'),
+    dotColorModeInput: query<HTMLSelectElement>('#dot-color-mode-input'),
+    dotDirectionField: query<HTMLElement>('#dot-direction-field'),
+    dotDirectionModeInput: query<HTMLSelectElement>('#dot-direction-mode-input'),
+    dotAngleField: query<HTMLElement>('#dot-angle-field'),
+    dotAngleInput: query<HTMLInputElement>('#dot-angle-input'),
     dotCharField: query<HTMLElement>('#dot-char-field'),
     dotCharInput: query<HTMLInputElement>('#dot-char-input'),
     splitRatioInput: query<HTMLInputElement>('#split-ratio-input'),
@@ -1091,6 +1234,7 @@ function getRefs(): AppRefs {
     sizeOutput: query<HTMLOutputElement>('#size-output'),
     varianceOutput: query<HTMLOutputElement>('#variance-output'),
     countOutput: query<HTMLOutputElement>('#count-output'),
+    dotAngleOutput: query<HTMLOutputElement>('#dot-angle-output'),
     backgroundStripeSizeOutput: query<HTMLOutputElement>('#background-stripe-size-output'),
     shuffleButton: query<HTMLButtonElement>('#shuffle-button'),
     undoDotButton: query<HTMLButtonElement>('#undo-dot-button'),
@@ -1105,6 +1249,7 @@ function getRefs(): AppRefs {
     punchCanvas: query<HTMLCanvasElement>('#punch-canvas'),
     paperPanel: query<HTMLElement>('.panel--paper'),
     punchPanel: query<HTMLElement>('.panel--image'),
+    previewCard: query<HTMLElement>('.stage-card--poster'),
     posterPreviewCanvas: query<HTMLCanvasElement>('#poster-preview-canvas'),
     previewTitle: query<HTMLElement>('#preview-title'),
     posterThemeLabel: query<HTMLElement>('#poster-theme-label'),
@@ -1157,46 +1302,28 @@ function getResultsClass(layoutDirection: LayoutDirection, image: HTMLImageEleme
   return image ? `results results--${layoutDirection}` : `results results--${layoutDirection} results--empty`;
 }
 
-function syncSwatch(element: HTMLElement, value: string): void {
-  element.style.setProperty('--color-swatch', value);
+function supportsDotDirection(shape: DotShape): boolean {
+  return shape !== 'circle' && shape !== 'snowflake';
 }
 
-function renderImagePreviewCanvas(canvas: HTMLCanvasElement, sourceCanvas: HTMLCanvasElement | null): void {
-  const pixelRatio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-  const width = Math.max(720, Math.round((canvas.clientWidth || 340) * pixelRatio));
-  const aspect = sourceCanvas ? sourceCanvas.height / sourceCanvas.width : 1.18;
-  const height = Math.max(1, Math.round(width * aspect));
-  canvas.width = width;
-  canvas.height = height;
-  canvas.style.aspectRatio = `${width} / ${height}`;
+function waitForNextPaint(): Promise<void> {
+  return new Promise(resolve => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, 0);
+    });
+  });
+}
 
-  const context = canvas.getContext('2d');
-  if (!context) {
-    return;
-  }
+function clearStatusLater(element: HTMLElement, expectedText: string, delay = 1800): void {
+  window.setTimeout(() => {
+    if (element.textContent === expectedText) {
+      element.textContent = '';
+    }
+  }, delay);
+}
 
-  context.clearRect(0, 0, width, height);
-  context.fillStyle = '#f4ede2';
-  context.fillRect(0, 0, width, height);
-
-  if (!sourceCanvas) {
-    context.fillStyle = 'rgba(24, 19, 17, 0.12)';
-    context.fillRect(width * 0.12, height * 0.2, width * 0.76, height * 0.52);
-    return;
-  }
-
-  const framePadding = Math.round(width * 0.04);
-  const innerWidth = width - framePadding * 2;
-  const innerHeight = height - framePadding * 2;
-  const scale = Math.min(innerWidth / sourceCanvas.width, innerHeight / sourceCanvas.height);
-  const drawWidth = sourceCanvas.width * scale;
-  const drawHeight = sourceCanvas.height * scale;
-  const offsetX = (width - drawWidth) / 2;
-  const offsetY = (height - drawHeight) / 2;
-
-  context.fillStyle = '#fffaf4';
-  context.fillRect(framePadding, framePadding, innerWidth, innerHeight);
-  context.drawImage(sourceCanvas, offsetX, offsetY, drawWidth, drawHeight);
+function syncSwatch(element: HTMLElement, value: string): void {
+  element.style.setProperty('--color-swatch', value);
 }
 
 function createDotFromPointer(event: MouseEvent, canvas: HTMLCanvasElement): DotPoint | null {
@@ -1284,6 +1411,10 @@ function detectMimeType(buffer: ArrayBuffer): string {
 }
 
 async function tryShareFile(blob: Blob, fileName: string): Promise<boolean> {
+  if (!isMobileDevice()) {
+    return false;
+  }
+
   const navigatorWithShare = navigator as Navigator & {
     canShare?: (data: ShareData) => boolean;
     share?: (data: ShareData) => Promise<void>;
@@ -1303,22 +1434,64 @@ async function tryShareFile(blob: Blob, fileName: string): Promise<boolean> {
   }
 
   try {
-    await navigatorWithShare.share({ files: [file], title: fileName });
+    await Promise.race([
+      navigatorWithShare.share({ files: [file], title: fileName }),
+      new Promise((_, reject) => {
+        window.setTimeout(() => reject(new Error('share-timeout')), SHARE_TIMEOUT_MS);
+      }),
+    ]);
     return true;
   } catch (error) {
     return Boolean(typeof error === 'object' && error && 'name' in error && (error as DOMException).name === 'AbortError');
   }
 }
 
-function downloadBlob(blob: Blob, fileName: string): void {
+type DownloadState = 'started' | 'cancelled' | 'failed';
+
+async function downloadBlob(blob: Blob, fileName: string): Promise<DownloadState> {
+  const legacyNavigator = navigator as Navigator & {
+    msSaveBlob?: (blob: Blob, defaultName?: string) => boolean;
+    msSaveOrOpenBlob?: (blob: Blob, defaultName?: string) => boolean;
+  };
+
+  if (typeof legacyNavigator.msSaveOrOpenBlob === 'function') {
+    legacyNavigator.msSaveOrOpenBlob(blob, fileName);
+    return 'started';
+  }
+
+  if (typeof legacyNavigator.msSaveBlob === 'function') {
+    legacyNavigator.msSaveBlob(blob, fileName);
+    return 'started';
+  }
+
   const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = objectUrl;
-  anchor.download = fileName;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = fileName;
+    anchor.rel = 'noopener';
+    anchor.style.display = 'none';
+    document.body.append(anchor);
+    if (typeof anchor.click === 'function') {
+      anchor.click();
+    } else {
+      anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    }
+    window.setTimeout(() => {
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    }, 30_000);
+    return 'started';
+  } catch {
+    try {
+      window.open(objectUrl, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+      return 'started';
+    } catch {
+      URL.revokeObjectURL(objectUrl);
+      return 'failed';
+    }
+  }
 }
 
 function getPosterFileName(fileName: string | null): string {
@@ -1326,8 +1499,12 @@ function getPosterFileName(fileName: string | null): string {
   return `${base}-poster.jpg`;
 }
 
-function isWeixin(): boolean {
-  return /MicroMessenger/i.test(navigator.userAgent);
+function isWeixinMobile(): boolean {
+  return /MicroMessenger/i.test(navigator.userAgent) && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+function isMobileDevice(): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 function showSaveOverlay(dataUrl: string): void {

@@ -1,6 +1,8 @@
 export type LayoutDirection = 'image-left' | 'image-right' | 'image-top' | 'image-bottom';
-export type DotShape = 'circle' | 'square' | 'star' | 'drop' | 'snowflake' | 'char';
-export type DotDistributionMode = 'random' | 'manual-unpaired' | 'manual-paired';
+export type DotShape = 'circle' | 'square' | 'diamond' | 'star' | 'spark' | 'heart' | 'flower' | 'drop' | 'snowflake' | 'char';
+export type DotDistributionMode = 'random' | 'grid' | 'burst' | 'wave' | 'spiral' | 'manual-unpaired' | 'manual-paired';
+export type DotColorMode = 'photo' | 'single' | 'duotone' | 'gradient' | 'candy';
+export type DotDirectionMode = 'fixed' | 'random';
 export type DotActionType = 'add-positive-dot' | 'add-negative-dot' | 'add-paired-dot';
 
 export interface DotPoint {
@@ -31,6 +33,12 @@ export interface AppState {
   dotDistributionMode: DotDistributionMode;
   dotShape: DotShape;
   dotChar: string;
+  dotColorMode: DotColorMode;
+  dotDirectionMode: DotDirectionMode;
+  dotDirectionAngle: number;
+  dotColorPrimary: string;
+  dotColorSecondary: string;
+  dotColorAccent: string;
   layoutDirection: LayoutDirection;
   seed: number;
   varianceSeed: number;
@@ -53,6 +61,13 @@ export interface SurfaceSize {
   renderWidth: number;
   renderHeight: number;
   pixelRatio: number;
+}
+
+export interface DotStyleConfig {
+  colorMode: DotColorMode;
+  primaryColor: string;
+  secondaryColor: string;
+  accentColor: string;
 }
 
 export type BackgroundConfig =
@@ -79,6 +94,12 @@ type ReducerAction =
   | { type: 'set-distribution-mode'; value: DotDistributionMode }
   | { type: 'set-shape'; value: DotShape }
   | { type: 'set-dot-char'; value: string }
+  | { type: 'set-dot-color-mode'; value: DotColorMode }
+  | { type: 'set-dot-direction-mode'; value: DotDirectionMode }
+  | { type: 'set-dot-direction-angle'; value: number }
+  | { type: 'set-dot-color-primary'; value: string }
+  | { type: 'set-dot-color-secondary'; value: string }
+  | { type: 'set-dot-color-accent'; value: string }
   | { type: 'set-layout-direction'; value: LayoutDirection }
   | { type: 'set-split-ratio'; value: number }
   | { type: 'set-background-source'; value: AppState['backgroundSource'] }
@@ -106,6 +127,11 @@ const EXPORT_JPEG_QUALITY = 0.9;
 const MAX_BLOB_SIZE = 20 * 1024 * 1024;
 const MAX_DOWNSCALE_STEPS = 6;
 const EASTER_EGG_INTERVAL = 5;
+const DEFAULT_EXPORT_MAX_LONG_EDGE = 3_200;
+const DEFAULT_EXPORT_MAX_PIXELS = 8_000_000;
+const CANVAS_BLOB_TIMEOUT_MS = 12_000;
+const MAX_ENCODE_RETRIES = 3;
+const FALLBACK_JPEG_QUALITY = 0.88;
 const SNOWFLAKE_GRID = [
   [0, 6],
   [1, 6],
@@ -169,6 +195,12 @@ export function createInitialState(): AppState {
     dotDistributionMode: 'random',
     dotShape: 'circle',
     dotChar: '喵',
+    dotColorMode: 'photo',
+    dotDirectionMode: 'fixed',
+    dotDirectionAngle: 0,
+    dotColorPrimary: '#f6efe3',
+    dotColorSecondary: '#d8c2ae',
+    dotColorAccent: '#c96b4d',
     layoutDirection: 'image-top',
     seed: randomSeed(),
     varianceSeed: randomSeed(),
@@ -188,6 +220,15 @@ export function createInitialState(): AppState {
 
 export function isRainbowShuffle(shuffleCount: number): boolean {
   return shuffleCount > 0 && shuffleCount % EASTER_EGG_INTERVAL === 0;
+}
+
+export function createDotStyleConfig(state: AppState): DotStyleConfig {
+  return {
+    colorMode: state.dotColorMode,
+    primaryColor: state.dotColorPrimary,
+    secondaryColor: state.dotColorSecondary,
+    accentColor: state.dotColorAccent,
+  };
 }
 
 export function reduceState(state: AppState, action: ReducerAction): AppState {
@@ -214,6 +255,30 @@ export function reduceState(state: AppState, action: ReducerAction): AppState {
 
   if (action.type === 'set-dot-char') {
     return { ...state, dotChar: action.value };
+  }
+
+  if (action.type === 'set-dot-color-mode') {
+    return { ...state, dotColorMode: action.value };
+  }
+
+  if (action.type === 'set-dot-direction-mode') {
+    return { ...state, dotDirectionMode: action.value };
+  }
+
+  if (action.type === 'set-dot-direction-angle') {
+    return { ...state, dotDirectionAngle: action.value };
+  }
+
+  if (action.type === 'set-dot-color-primary') {
+    return { ...state, dotColorPrimary: action.value };
+  }
+
+  if (action.type === 'set-dot-color-secondary') {
+    return { ...state, dotColorSecondary: action.value };
+  }
+
+  if (action.type === 'set-dot-color-accent') {
+    return { ...state, dotColorAccent: action.value };
   }
 
   if (action.type === 'set-layout-direction') {
@@ -296,7 +361,10 @@ export function reduceState(state: AppState, action: ReducerAction): AppState {
 }
 
 export function getDotActionForSurface(kind: 'paper' | 'punch', state: AppState): DotActionType | null {
-  if (!state.image || state.dotDistributionMode === 'random') {
+  if (
+    !state.image ||
+    (state.dotDistributionMode !== 'manual-unpaired' && state.dotDistributionMode !== 'manual-paired')
+  ) {
     return null;
   }
 
@@ -333,26 +401,66 @@ export function computeDots(state: AppState, surface: SurfaceSize): { paperDots:
 
   if (state.dotDistributionMode === 'manual-unpaired') {
     return {
-      paperDots: pointsToDots(surface, state.dotSize, state.dotVariance, state.dotShape, state.manualNegativeDots, charValue),
-      punchDots: pointsToDots(surface, state.dotSize, state.dotVariance, state.dotShape, state.manualPositiveDots, charValue),
+      paperDots: pointsToDots(
+        surface,
+        state.dotSize,
+        state.dotVariance,
+        state.dotShape,
+        state.manualNegativeDots,
+        charValue,
+        state.dotDirectionMode,
+        state.dotDirectionAngle,
+      ),
+      punchDots: pointsToDots(
+        surface,
+        state.dotSize,
+        state.dotVariance,
+        state.dotShape,
+        state.manualPositiveDots,
+        charValue,
+        state.dotDirectionMode,
+        state.dotDirectionAngle,
+      ),
     };
   }
 
   if (state.dotDistributionMode === 'manual-paired') {
-    const sharedDots = pointsToDots(surface, state.dotSize, state.dotVariance, state.dotShape, state.manualPairedDots, charValue);
+    const sharedDots = pointsToDots(
+      surface,
+      state.dotSize,
+      state.dotVariance,
+      state.dotShape,
+      state.manualPairedDots,
+      charValue,
+      state.dotDirectionMode,
+      state.dotDirectionAngle,
+    );
     return {
       paperDots: sharedDots,
       punchDots: sharedDots,
     };
   }
 
-  const randomDots = generateRandomDots({
+  const generator =
+    state.dotDistributionMode === 'grid'
+      ? generateGridDots
+      : state.dotDistributionMode === 'burst'
+        ? generateBurstDots
+        : state.dotDistributionMode === 'wave'
+          ? generateWaveDots
+          : state.dotDistributionMode === 'spiral'
+            ? generateSpiralDots
+        : generateRandomDots;
+
+  const randomDots = generator({
     width: surface.cssWidth,
     height: surface.cssHeight,
     count: state.dotCount,
     size: state.dotSize,
     variance: state.dotVariance,
     shape: state.dotShape,
+    directionMode: state.dotDirectionMode,
+    directionAngle: state.dotDirectionAngle,
     seed: state.seed,
     varianceSeed: state.varianceSeed ?? state.seed,
     charValue,
@@ -442,6 +550,7 @@ export function renderPaperCanvas(
   dots: RenderDot[],
   background: BackgroundConfig,
   seed: number,
+  dotStyle: DotStyleConfig,
   rainbowMode = false,
 ): void {
   const prepared = prepareCanvasContext(canvas);
@@ -456,11 +565,16 @@ export function renderPaperCanvas(
     return;
   }
 
+  const photoFillCanvas = dotStyle.colorMode === 'photo' ? createPhotoFillCanvas(image, background, prepared.width, prepared.height) : null;
+
   for (const dot of dots) {
     if (dot.shape === 'char') {
       drawCharacterMask(prepared.context, dot, fillContext => {
-        fillBackground(fillContext, prepared.width, prepared.height, background);
-        drawImageCover(fillContext, image, prepared.width, prepared.height);
+        if (photoFillCanvas) {
+          fillContext.drawImage(photoFillCanvas, 0, 0, prepared.width, prepared.height);
+          return;
+        }
+        fillDotVisual(fillContext, dot, image, background, prepared.width, prepared.height, dotStyle, seed);
       });
       continue;
     }
@@ -468,7 +582,11 @@ export function renderPaperCanvas(
     prepared.context.save();
     drawShapePath(prepared.context, dot);
     prepared.context.clip();
-    drawImageCover(prepared.context, image, prepared.width, prepared.height);
+    if (photoFillCanvas) {
+      prepared.context.drawImage(photoFillCanvas, 0, 0, prepared.width, prepared.height);
+    } else {
+      fillDotVisual(prepared.context, dot, image, background, prepared.width, prepared.height, dotStyle, seed);
+    }
     prepared.context.restore();
     strokeVisibleCircleOutline(prepared.context, dot, dots, 'rgba(84, 72, 56, 0.08)');
   }
@@ -480,6 +598,7 @@ export function renderPunchCanvas(
   dots: RenderDot[],
   background: BackgroundConfig,
   seed: number,
+  dotStyle: DotStyleConfig,
   rainbowMode = false,
 ): void {
   const prepared = prepareCanvasContext(canvas);
@@ -494,7 +613,7 @@ export function renderPunchCanvas(
     return;
   }
 
-  renderPunchDots(prepared, dots, background, seed);
+  renderPunchDots(prepared, dots, image, background, seed, dotStyle);
 }
 
 export function adjustBackgroundForExport(
@@ -516,15 +635,36 @@ export function adjustBackgroundForExport(
   };
 }
 
-export function createExportSurface(image: HTMLImageElement, previewCanvas: HTMLCanvasElement | null): SurfaceSize {
-  const cssWidth = Math.max(1, Math.round(image.naturalWidth || image.width || 1));
+export function createExportSurface(
+  image: HTMLImageElement,
+  previewCanvas: HTMLCanvasElement | null,
+  options?: {
+    layoutDirection?: LayoutDirection;
+    splitRatio?: number;
+    maxLongEdge?: number;
+    maxPixels?: number;
+  },
+): SurfaceSize {
+  const sourceWidth = Math.max(1, Math.round(image.naturalWidth || image.width || 1));
   const cssHeightFromImage = Math.max(1, Math.round(image.naturalHeight || image.height || 1));
+  const layoutDirection = options?.layoutDirection ?? 'image-top';
+  const splitRatio = clamp(options?.splitRatio ?? 50, 0, 100);
+  const maxLongEdge = Math.max(1_200, Math.round(options?.maxLongEdge ?? DEFAULT_EXPORT_MAX_LONG_EDGE));
+  const maxPixels = Math.max(2_000_000, Math.round(options?.maxPixels ?? DEFAULT_EXPORT_MAX_PIXELS));
+  const compositionScale = getCompositionScale(layoutDirection, splitRatio);
+  const imageAspect = sourceWidth > 0 ? cssHeightFromImage / sourceWidth : PREVIEW_ASPECT_FALLBACK;
+  const widthFromLongEdge = Math.floor(maxLongEdge / Math.max(compositionScale.widthFactor, imageAspect * compositionScale.heightFactor));
+  const widthFromPixels = Math.floor(
+    Math.sqrt(maxPixels / Math.max(0.01, imageAspect * compositionScale.widthFactor * compositionScale.heightFactor)),
+  );
+  const cssWidth = Math.max(1, Math.min(sourceWidth, widthFromLongEdge, widthFromPixels));
+  const limitedImageHeight = Math.max(1, Math.round(cssWidth * imageAspect));
   if (!previewCanvas) {
     return {
       cssWidth,
-      cssHeight: cssHeightFromImage,
+      cssHeight: limitedImageHeight,
       renderWidth: cssWidth,
-      renderHeight: cssHeightFromImage,
+      renderHeight: limitedImageHeight,
       pixelRatio: 1,
     };
   }
@@ -533,9 +673,9 @@ export function createExportSurface(image: HTMLImageElement, previewCanvas: HTML
   if (previewSize.width <= 0 || previewSize.height <= 0) {
     return {
       cssWidth,
-      cssHeight: cssHeightFromImage,
+      cssHeight: limitedImageHeight,
       renderWidth: cssWidth,
-      renderHeight: cssHeightFromImage,
+      renderHeight: limitedImageHeight,
       pixelRatio: 1,
     };
   }
@@ -629,8 +769,8 @@ export function composeExportCanvas(
   return exportCanvas;
 }
 
-export function getExportSettings(background: BackgroundConfig): { mimeType: typeof JPEG_MIME | typeof PNG_MIME; quality?: number } {
-  return background.type === 'image' ? { mimeType: PNG_MIME } : { mimeType: JPEG_MIME, quality: EXPORT_JPEG_QUALITY };
+export function getExportSettings(_background: BackgroundConfig): { mimeType: typeof JPEG_MIME | typeof PNG_MIME; quality?: number } {
+  return { mimeType: JPEG_MIME, quality: EXPORT_JPEG_QUALITY };
 }
 
 export function getExportFileName(fileName: string | null, mimeType: typeof JPEG_MIME | typeof PNG_MIME): string {
@@ -654,12 +794,28 @@ export async function canvasToExportBlob(
   quality?: number,
 ): Promise<Blob | null> {
   let currentCanvas = canvas;
-  let blob = await canvasToBlob(currentCanvas, mimeType, quality);
-  if (!blob) {
-    return null;
-  }
+  let currentMimeType = mimeType;
+  let currentQuality = quality;
 
   for (let step = 0; step < MAX_DOWNSCALE_STEPS; step += 1) {
+    const blob = await canvasToBlob(currentCanvas, currentMimeType, currentQuality);
+    if (!blob) {
+      if (step >= MAX_ENCODE_RETRIES - 1) {
+        return null;
+      }
+
+      const fallbackSize = scaleCanvasSize(currentCanvas, 0.82);
+      const fallbackCanvas = resizeCanvas(currentCanvas, fallbackSize.width, fallbackSize.height);
+      if (!fallbackCanvas) {
+        return null;
+      }
+
+      currentCanvas = fallbackCanvas;
+      currentMimeType = JPEG_MIME;
+      currentQuality = FALLBACK_JPEG_QUALITY;
+      continue;
+    }
+
     if (blob.type !== PNG_MIME || blob.size <= MAX_BLOB_SIZE) {
       return blob;
     }
@@ -675,15 +831,11 @@ export async function canvasToExportBlob(
     }
 
     currentCanvas = downscaledCanvas;
-    const nextBlob = await canvasToBlob(currentCanvas, PNG_MIME);
-    if (!nextBlob) {
-      return blob;
-    }
-
-    blob = nextBlob;
+    currentMimeType = PNG_MIME;
+    currentQuality = undefined;
   }
 
-  return blob;
+  return await canvasToBlob(currentCanvas, currentMimeType, currentQuality);
 }
 
 function randomSeed(): number {
@@ -710,6 +862,22 @@ function decodeLayout(layoutDirection: LayoutDirection): { axis: 'horizontal' | 
   return { axis: 'vertical', imageFirst: false };
 }
 
+function getCompositionScale(layoutDirection: LayoutDirection, splitRatio: number): { widthFactor: number; heightFactor: number } {
+  const safeSplit = clamp(splitRatio, 0, 100);
+  const compositionFactor = 2 - Math.abs(safeSplit - 50) / 50;
+  if (getLayoutAxis(layoutDirection) === 'horizontal') {
+    return {
+      widthFactor: compositionFactor,
+      heightFactor: 1,
+    };
+  }
+
+  return {
+    widthFactor: 1,
+    heightFactor: compositionFactor,
+  };
+}
+
 function seededRandom(seed: number): () => number {
   let value = seed >>> 0;
   return () => {
@@ -724,6 +892,10 @@ function normalizeFactor(value: number): number {
   }
 
   return Math.min(1, Math.max(0, value));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function computeBaseRadius(size: number, width: number): number {
@@ -742,20 +914,52 @@ function clampPosition(ratio: number, size: number, radius: number): number {
   return Math.min(max, Math.max(radius, target));
 }
 
-function normalizeShape(shape: DotShape, sample: number): BaseDotShape {
+function normalizeShape(
+  shape: DotShape,
+  sample: number,
+  directionMode: DotDirectionMode,
+  directionAngle: number,
+): BaseDotShape {
   const normalized = normalizeFactor(sample);
+  const rotation = resolveShapeRotation(shape, normalized, directionMode, directionAngle);
   if (shape === 'star') {
     return {
       shape,
-      rotation: normalized * FULL_ARC,
+      rotation,
       innerRadiusRatio: 0.42 + normalized * 0.16,
+    };
+  }
+
+  if (shape === 'spark') {
+    return {
+      shape,
+      rotation,
+      innerRadiusRatio: 0.22 + normalized * 0.08,
     };
   }
 
   return {
     shape,
-    rotation: 0,
+    rotation,
   };
+}
+
+function resolveShapeRotation(
+  shape: DotShape,
+  sample: number,
+  directionMode: DotDirectionMode,
+  directionAngle: number,
+): number {
+  if (shape === 'circle' || shape === 'snowflake') {
+    return 0;
+  }
+
+  const baseRotation = shape === 'diamond' ? Math.PI / 4 : 0;
+  if (directionMode === 'random') {
+    return baseRotation + normalizeFactor(sample) * FULL_ARC;
+  }
+
+  return baseRotation + degreesToRadians(directionAngle);
 }
 
 function generateRandomDots(config: {
@@ -765,11 +969,13 @@ function generateRandomDots(config: {
   size: number;
   variance: number;
   shape: DotShape;
+  directionMode: DotDirectionMode;
+  directionAngle: number;
   seed: number;
   varianceSeed: number;
   charValue?: string;
 }): RenderDot[] {
-  const { width, height, count, size, variance, shape, seed, varianceSeed, charValue } = config;
+  const { width, height, count, size, variance, shape, directionMode, directionAngle, seed, varianceSeed, charValue } = config;
   const points: Array<Omit<DotPoint, 'varianceSample'> & { x: number; y: number }> = [];
   const positionRandom = seededRandom(seed);
   const varianceRandom = seededRandom(varianceSeed);
@@ -822,12 +1028,204 @@ function generateRandomDots(config: {
     const radius = Math.min(varyRadius(baseRadius, variance, varianceRandom()), width > 0 ? width * 0.34 : baseRadius, height > 0 ? height * 0.34 : baseRadius);
     return {
       radius,
-      ...normalizeShape(shape, point.profileSample),
+      ...normalizeShape(shape, point.profileSample, directionMode, directionAngle),
       x: clampPosition(point.xRatio, width, radius),
       y: clampPosition(point.yRatio, height, radius),
       ...(charValue !== undefined ? { charValue } : {}),
     };
   });
+}
+
+function generateGridDots(config: {
+  width: number;
+  height: number;
+  count: number;
+  size: number;
+  variance: number;
+  shape: DotShape;
+  directionMode: DotDirectionMode;
+  directionAngle: number;
+  seed: number;
+  varianceSeed: number;
+  charValue?: string;
+}): RenderDot[] {
+  const { width, height, count, size, variance, shape, directionMode, directionAngle, seed, varianceSeed, charValue } = config;
+  const positionRandom = seededRandom(seed);
+  const varianceRandom = seededRandom(varianceSeed);
+  const columns = Math.max(2, Math.ceil(Math.sqrt(count * (width / Math.max(height, 1)))));
+  const rows = Math.max(2, Math.ceil(count / columns));
+  const points: DotPoint[] = [];
+
+  for (let row = 0; row < rows && points.length < count; row += 1) {
+    for (let column = 0; column < columns && points.length < count; column += 1) {
+      const jitterX = (positionRandom() - 0.5) * 0.2;
+      const jitterY = (positionRandom() - 0.5) * 0.2;
+      points.push({
+        xRatio: (column + 0.5 + (row % 2 === 0 ? jitterX : -jitterX)) / columns,
+        yRatio: (row + 0.5 + jitterY) / rows,
+        varianceSample: varianceRandom(),
+        profileSample: positionRandom(),
+      });
+    }
+  }
+
+  return pointsToDots(
+    { cssWidth: width, cssHeight: height, renderWidth: width, renderHeight: height, pixelRatio: 1 },
+    size,
+    variance,
+    shape,
+    points,
+    charValue,
+    directionMode,
+    directionAngle,
+  );
+}
+
+function generateBurstDots(config: {
+  width: number;
+  height: number;
+  count: number;
+  size: number;
+  variance: number;
+  shape: DotShape;
+  directionMode: DotDirectionMode;
+  directionAngle: number;
+  seed: number;
+  varianceSeed: number;
+  charValue?: string;
+}): RenderDot[] {
+  const { width, height, count, size, variance, shape, directionMode, directionAngle, seed, varianceSeed, charValue } = config;
+  const random = seededRandom(seed);
+  const varianceRandom = seededRandom(varianceSeed);
+  const points: DotPoint[] = [];
+  const centerX = 0.5 + (random() - 0.5) * 0.12;
+  const centerY = 0.48 + (random() - 0.5) * 0.12;
+  const rings = Math.max(2, Math.ceil(Math.sqrt(count)));
+
+  for (let index = 0; index < count; index += 1) {
+    const ring = Math.floor((index / Math.max(1, count - 1)) * rings);
+    const ringShare = (ring + 1) / (rings + 1);
+    const angle = ((index / count) * FULL_ARC * (2 + random())) + random() * 0.5;
+    const radialJitter = (random() - 0.5) * 0.08;
+    const radius = ringShare * 0.42 + radialJitter;
+    points.push({
+      xRatio: centerX + Math.cos(angle) * radius * (width > height ? height / width : 1),
+      yRatio: centerY + Math.sin(angle) * radius * (height > width ? width / height : 1),
+      varianceSample: varianceRandom(),
+      profileSample: random(),
+    });
+  }
+
+  return pointsToDots(
+    { cssWidth: width, cssHeight: height, renderWidth: width, renderHeight: height, pixelRatio: 1 },
+    size,
+    variance,
+    shape,
+    points,
+    charValue,
+    directionMode,
+    directionAngle,
+  );
+}
+
+function generateWaveDots(config: {
+  width: number;
+  height: number;
+  count: number;
+  size: number;
+  variance: number;
+  shape: DotShape;
+  directionMode: DotDirectionMode;
+  directionAngle: number;
+  seed: number;
+  varianceSeed: number;
+  charValue?: string;
+}): RenderDot[] {
+  const { width, height, count, size, variance, shape, directionMode, directionAngle, seed, varianceSeed, charValue } = config;
+  const random = seededRandom(seed);
+  const varianceRandom = seededRandom(varianceSeed);
+  const points: DotPoint[] = [];
+  const ribbons = Math.max(2, Math.min(4, Math.ceil(Math.sqrt(count) / 2)));
+  const safeCount = Math.max(1, count);
+  const horizontalScale = width > height ? height / Math.max(width, 1) : 1;
+
+  for (let index = 0; index < safeCount; index += 1) {
+    const progress = safeCount === 1 ? 0.5 : index / (safeCount - 1);
+    const ribbon = index % ribbons;
+    const ribbonCenter = (ribbon + 0.5) / ribbons;
+    const amplitude = 0.05 + random() * 0.1;
+    const frequency = 1.2 + random() * 1.8;
+    const phase = ribbon * 0.22 + random() * 0.1;
+    const driftX = (random() - 0.5) * 0.06;
+    const driftY = (random() - 0.5) * 0.035;
+
+    points.push({
+      xRatio: progress + driftX,
+      yRatio: ribbonCenter + Math.sin((progress * frequency + phase) * FULL_ARC) * amplitude * horizontalScale + driftY,
+      varianceSample: varianceRandom(),
+      profileSample: random(),
+    });
+  }
+
+  return pointsToDots(
+    { cssWidth: width, cssHeight: height, renderWidth: width, renderHeight: height, pixelRatio: 1 },
+    size,
+    variance,
+    shape,
+    points,
+    charValue,
+    directionMode,
+    directionAngle,
+  );
+}
+
+function generateSpiralDots(config: {
+  width: number;
+  height: number;
+  count: number;
+  size: number;
+  variance: number;
+  shape: DotShape;
+  directionMode: DotDirectionMode;
+  directionAngle: number;
+  seed: number;
+  varianceSeed: number;
+  charValue?: string;
+}): RenderDot[] {
+  const { width, height, count, size, variance, shape, directionMode, directionAngle, seed, varianceSeed, charValue } = config;
+  const random = seededRandom(seed);
+  const varianceRandom = seededRandom(varianceSeed);
+  const points: DotPoint[] = [];
+  const centerX = 0.5 + (random() - 0.5) * 0.08;
+  const centerY = 0.5 + (random() - 0.5) * 0.08;
+  const turns = 1.6 + random() * 1.6;
+  const horizontalScale = width > height ? height / Math.max(width, 1) : 1;
+  const verticalScale = height > width ? width / Math.max(height, 1) : 1;
+  const safeCount = Math.max(1, count);
+
+  for (let index = 0; index < safeCount; index += 1) {
+    const progress = safeCount === 1 ? 0.5 : index / (safeCount - 1);
+    const angle = progress * FULL_ARC * turns + random() * 0.24;
+    const radius = 0.08 + progress * 0.34 + (random() - 0.5) * 0.04;
+
+    points.push({
+      xRatio: centerX + Math.cos(angle) * radius * horizontalScale,
+      yRatio: centerY + Math.sin(angle) * radius * verticalScale,
+      varianceSample: varianceRandom(),
+      profileSample: random(),
+    });
+  }
+
+  return pointsToDots(
+    { cssWidth: width, cssHeight: height, renderWidth: width, renderHeight: height, pixelRatio: 1 },
+    size,
+    variance,
+    shape,
+    points,
+    charValue,
+    directionMode,
+    directionAngle,
+  );
 }
 
 function pointsToDots(
@@ -837,13 +1235,15 @@ function pointsToDots(
   shape: DotShape,
   points: DotPoint[],
   charValue?: string,
+  directionMode: DotDirectionMode = 'fixed',
+  directionAngle = 0,
 ): RenderDot[] {
   const baseRadius = computeBaseRadius(size, surface.cssWidth);
   return points.map(point => {
     const radius = varyRadius(baseRadius, variance, point.varianceSample);
     return {
       radius,
-      ...normalizeShape(shape, point.profileSample),
+      ...normalizeShape(shape, point.profileSample, directionMode, directionAngle),
       x: clampPosition(point.xRatio, surface.cssWidth, radius),
       y: clampPosition(point.yRatio, surface.cssHeight, radius),
       ...(charValue !== undefined ? { charValue } : {}),
@@ -917,6 +1317,25 @@ function drawImageCover(
   context.drawImage(image, fit.offsetX, fit.offsetY, fit.drawWidth, fit.drawHeight);
 }
 
+function createPhotoFillCanvas(
+  image: HTMLImageElement,
+  background: BackgroundConfig,
+  width: number,
+  height: number,
+): HTMLCanvasElement | null {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return null;
+  }
+
+  fillBackground(context, width, height, background);
+  drawImageCover(context, image, width, height);
+  return canvas;
+}
+
 function computeCoverFit(
   image: { width: number; height: number },
   target: { width: number; height: number },
@@ -952,11 +1371,117 @@ function renderRainbowDots(context: CanvasRenderingContext2D, dots: RenderDot[],
   }
 }
 
+function fillDotVisual(
+  context: CanvasRenderingContext2D,
+  dot: RenderDot,
+  image: HTMLImageElement,
+  background: BackgroundConfig,
+  width: number,
+  height: number,
+  dotStyle: DotStyleConfig,
+  seed: number,
+): void {
+  if (dotStyle.colorMode === 'photo') {
+    fillBackground(context, width, height, background);
+    drawImageCover(context, image, width, height);
+    return;
+  }
+
+  fillDotStyleOnly(context, dot, image, background, width, height, dotStyle, seed, false);
+}
+
+function fillDotStyleOnly(
+  context: CanvasRenderingContext2D,
+  dot: RenderDot,
+  image: HTMLImageElement,
+  background: BackgroundConfig,
+  width: number,
+  height: number,
+  dotStyle: DotStyleConfig,
+  seed: number,
+  invert = false,
+): void {
+  const x = dot.x - dot.radius;
+  const y = dot.y - dot.radius;
+  const size = dot.radius * 2;
+
+  if (dotStyle.colorMode === 'gradient') {
+    context.fillStyle = buildDotGradient(context, dot, dotStyle, seed, invert);
+    context.fillRect(x, y, size, size);
+    return;
+  }
+
+  const color = resolveDotPaletteColor(dot, dotStyle, seed, invert);
+  if (color) {
+    context.fillStyle = color;
+    context.fillRect(x, y, size, size);
+    return;
+  }
+
+  if (background.type === 'image') {
+    drawImageCover(context, background.image, width, height);
+    return;
+  }
+
+  if (dotStyle.colorMode === 'photo') {
+    fillBackground(context, width, height, background);
+    drawImageCover(context, image, width, height);
+    return;
+  }
+
+  fillBackground(context, width, height, background);
+}
+
+function resolveDotPaletteColor(dot: RenderDot, dotStyle: DotStyleConfig, seed: number, invert = false): string | null {
+  if (dotStyle.colorMode === 'single') {
+    return invert ? dotStyle.primaryColor : dotStyle.accentColor;
+  }
+
+  if (dotStyle.colorMode === 'duotone') {
+    const base = dotNoise(dot, seed);
+    if (base < 0.5) {
+      return invert ? dotStyle.secondaryColor : dotStyle.primaryColor;
+    }
+    return invert ? dotStyle.accentColor : dotStyle.accentColor;
+  }
+
+  if (dotStyle.colorMode === 'candy') {
+    const palette = invert
+      ? [dotStyle.secondaryColor, dotStyle.accentColor, dotStyle.primaryColor]
+      : [dotStyle.primaryColor, dotStyle.secondaryColor, dotStyle.accentColor];
+    const index = Math.floor(dotNoise(dot, seed) * palette.length) % palette.length;
+    return palette[index];
+  }
+
+  return null;
+}
+
+function buildDotGradient(
+  context: CanvasRenderingContext2D,
+  dot: RenderDot,
+  dotStyle: DotStyleConfig,
+  seed: number,
+  invert = false,
+): CanvasGradient {
+  const angle = dotNoise(dot, seed) * FULL_ARC;
+  const startX = dot.x + Math.cos(angle) * dot.radius;
+  const startY = dot.y + Math.sin(angle) * dot.radius;
+  const endX = dot.x - Math.cos(angle) * dot.radius;
+  const endY = dot.y - Math.sin(angle) * dot.radius;
+  const gradient = context.createLinearGradient(startX, startY, endX, endY);
+  gradient.addColorStop(0, invert ? dotStyle.secondaryColor : dotStyle.primaryColor);
+  gradient.addColorStop(0.55, dotStyle.accentColor);
+  gradient.addColorStop(1, invert ? dotStyle.primaryColor : dotStyle.secondaryColor);
+  return gradient;
+}
+
 function renderPunchDots(
   prepared: { context: CanvasRenderingContext2D; width: number; height: number },
   dots: RenderDot[],
+  image: HTMLImageElement,
   background: BackgroundConfig,
   seed: number,
+  dotStyle: DotStyleConfig,
 ): void {
   if (dots.length === 0) {
     return;
@@ -977,7 +1502,7 @@ function renderPunchDots(
     const tempCanvas = createDetachedCanvas(surface);
     const tempPrepared = prepareCanvasContext(tempCanvas);
     if (tempPrepared) {
-      if (background.type === 'image') {
+      if (background.type === 'image' && dotStyle.colorMode === 'photo') {
         tempPrepared.context.beginPath();
         for (const dot of imageDots) {
           appendShapePath(tempPrepared.context, dot);
@@ -988,10 +1513,12 @@ function renderPunchDots(
         tempPrepared.context.restore();
       } else {
         for (const dot of imageDots) {
+          tempPrepared.context.save();
           tempPrepared.context.beginPath();
           appendShapePath(tempPrepared.context, dot);
-          tempPrepared.context.fillStyle = resolvePunchFill(background, dot, seed) ?? PAPER_THEME.background;
-          tempPrepared.context.fill();
+          tempPrepared.context.clip();
+          fillDotStyleOnly(tempPrepared.context, dot, image, background, prepared.width, prepared.height, dotStyle, seed, true);
+          tempPrepared.context.restore();
         }
       }
 
@@ -1006,27 +1533,18 @@ function renderPunchDots(
 
   for (const dot of charDots) {
     drawCharacterMask(prepared.context, dot, fillContext => {
-      if (background.type === 'image') {
+      if (background.type === 'image' && dotStyle.colorMode === 'photo') {
         drawImageCover(fillContext, background.image, prepared.width, prepared.height);
         return;
       }
 
-      fillContext.fillStyle = resolvePunchFill(background, dot, seed) ?? PAPER_THEME.background;
-      fillContext.fillRect(dot.x - dot.radius, dot.y - dot.radius, dot.radius * 2, dot.radius * 2);
+      fillDotStyleOnly(fillContext, dot, image, background, prepared.width, prepared.height, dotStyle, seed, true);
     });
   }
 
   for (const dot of dots) {
     strokeVisibleCircleOutline(prepared.context, dot, dots, 'rgba(139, 116, 86, 0.09)');
   }
-}
-
-function resolvePunchFill(background: Exclude<BackgroundConfig, { type: 'image' }>, dot: RenderDot, seed: number): string | null {
-  if (background.type === 'color') {
-    return background.color;
-  }
-
-  return dotNoise(dot, seed) < 0.5 ? background.primaryColor : background.secondaryColor;
 }
 
 function pickRainbowColor(dot: RenderDot, seed: number): string {
@@ -1068,7 +1586,9 @@ function drawCharacterMask(
     maskContext.font = `${fontSize}px sans-serif`;
   }
   maskContext.fillStyle = '#000';
-  maskContext.fillText(value, maskCanvas.width / 2, maskCanvas.height / 2);
+  maskContext.translate(maskCanvas.width / 2, maskCanvas.height / 2);
+  maskContext.rotate(dot.rotation);
+  maskContext.fillText(value, 0, 0);
 
   const fillCanvas = document.createElement('canvas');
   fillCanvas.width = Math.ceil(size);
@@ -1132,6 +1652,21 @@ function getShapePolygon(dot: RenderDot): Array<{ x: number; y: number }> | null
     return null;
   }
 
+  if (dot.shape === 'heart') {
+    const raw = heartPoints(dot.radius, 28).map(point => ({
+      x: dot.x + point.x,
+      y: dot.y + point.y,
+    }));
+    return raw.map(point => rotatePoint(point, { x: dot.x, y: dot.y }, dot.rotation));
+  }
+
+  if (dot.shape === 'flower') {
+    return polarShapePoints(dot, 42, angle => {
+      const petals = 4;
+      return dot.radius * (0.48 + 0.52 * Math.abs(Math.sin(angle * petals)));
+    });
+  }
+
   if (dot.shape === 'drop') {
     const top = { x: dot.x, y: dot.y - dot.radius * 1.16 };
     const bottom = { x: dot.x, y: dot.y + dot.radius * 0.96 };
@@ -1154,7 +1689,7 @@ function getShapePolygon(dot: RenderDot): Array<{ x: number; y: number }> | null
     return [...left, ...right].map(point => rotatePoint(point, { x: dot.x, y: dot.y }, dot.rotation));
   }
 
-  if (dot.shape === 'square') {
+  if (dot.shape === 'square' || dot.shape === 'diamond') {
     return [
       { x: dot.x - dot.radius, y: dot.y - dot.radius },
       { x: dot.x + dot.radius, y: dot.y - dot.radius },
@@ -1163,11 +1698,12 @@ function getShapePolygon(dot: RenderDot): Array<{ x: number; y: number }> | null
     ].map(point => rotatePoint(point, { x: dot.x, y: dot.y }, dot.rotation));
   }
 
-  if (dot.shape === 'star') {
+  if (dot.shape === 'star' || dot.shape === 'spark') {
     const innerRadius = dot.radius * (dot.innerRadiusRatio ?? 0.48);
-    return Array.from({ length: 10 }, (_, index) => {
+    const points = dot.shape === 'spark' ? 8 : 10;
+    return Array.from({ length: points }, (_, index) => {
       const radius = index % 2 === 0 ? dot.radius : innerRadius;
-      const angle = dot.rotation - Math.PI / 2 + (index * FULL_ARC) / 10;
+      const angle = dot.rotation - Math.PI / 2 + (index * FULL_ARC) / points;
       return {
         x: dot.x + Math.cos(angle) * radius,
         y: dot.y + Math.sin(angle) * radius,
@@ -1176,6 +1712,37 @@ function getShapePolygon(dot: RenderDot): Array<{ x: number; y: number }> | null
   }
 
   return null;
+}
+
+function polarShapePoints(
+  dot: RenderDot,
+  steps: number,
+  radiusForAngle: (angle: number) => number,
+): Array<{ x: number; y: number }> {
+  return Array.from({ length: steps }, (_, index) => {
+    const angle = dot.rotation - Math.PI / 2 + (index * FULL_ARC) / steps;
+    const radius = radiusForAngle(angle - dot.rotation + Math.PI / 2);
+    return {
+      x: dot.x + Math.cos(angle) * radius,
+      y: dot.y + Math.sin(angle) * radius,
+    };
+  });
+}
+
+function heartPoints(radius: number, steps: number): Array<{ x: number; y: number }> {
+  return Array.from({ length: steps }, (_, index) => {
+    const t = (index / steps) * FULL_ARC;
+    const x = 16 * Math.sin(t) ** 3;
+    const y =
+      13 * Math.cos(t) -
+      5 * Math.cos(2 * t) -
+      2 * Math.cos(3 * t) -
+      Math.cos(4 * t);
+    return {
+      x: (x / 18) * radius,
+      y: (-y / 18) * radius,
+    };
+  });
 }
 
 function cubicBezierPoints(
@@ -1200,6 +1767,11 @@ function cubicBezierPoints(
   }
 
   return points;
+}
+
+function degreesToRadians(value: number): number {
+  const normalized = ((value % 360) + 360) % 360;
+  return (normalized / 180) * Math.PI;
 }
 
 function rotatePoint(
@@ -1346,6 +1918,13 @@ function scaleDownToBlobBudget(size: { width: number; height: number }, bytes: n
   };
 }
 
+function scaleCanvasSize(size: { width: number; height: number }, factor: number): { width: number; height: number } {
+  return {
+    width: Math.max(1, Math.floor(size.width * factor)),
+    height: Math.max(1, Math.floor(size.height * factor)),
+  };
+}
+
 function resizeCanvas(sourceCanvas: HTMLCanvasElement, width: number, height: number): HTMLCanvasElement | null {
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -1369,6 +1948,22 @@ function canvasToBlob(
   }
 
   return new Promise(resolve => {
-    canvas.toBlob(blob => resolve(blob), mimeType, quality);
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(null);
+    }, CANVAS_BLOB_TIMEOUT_MS);
+
+    canvas.toBlob(blob => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      resolve(blob);
+    }, mimeType, quality);
   });
 }
